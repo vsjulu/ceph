@@ -44,6 +44,9 @@ public:
     const std::set<K> &to_remove ///< [in] keys to remove
     ) = 0;
 
+  /// Remove all keys
+  virtual void clear() = 0;
+
   /// Add context to fire when data is readable
   virtual void add_callback(
     Context *c ///< [in] Context to fire on readable
@@ -162,6 +165,21 @@ public:
       vptrs.insert(ip);
     }
     t->remove_keys(keys);
+    t->add_callback(new TransHolder(vptrs));
+  }
+
+  /// Adds operation clearing all keys to Transaction
+  void clear(
+    Transaction<K, V> *t ///< [out] transaction to use
+    ) {
+    std::set<VPtr> vptrs;
+    pair<K, VPtr> next;
+    while (in_progress.get_next(next.first, &next)) {
+      boost::optional<V> empty;
+      *next.second = empty;
+      vptrs.insert(next.second);
+    }
+    t->clear();
     t->add_callback(new TransHolder(vptrs));
   }
 

@@ -88,6 +88,9 @@ public:
     void add_callback(Context *c) {
       callbacks.push_back(Op(new Callback(c)));
     }
+    void clear() {
+      assert(false);
+    }
   };
 private:
 

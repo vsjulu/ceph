@@ -72,6 +72,10 @@ class MOSDPGInfo;
 
 class PG;
 
+namespace Scrub {
+  class Store;
+}
+
 void intrusive_ptr_add_ref(PG *pg);
 void intrusive_ptr_release(PG *pg);
 
@@ -206,6 +210,7 @@ protected:
   Mutex map_lock;
   list<OpRequestRef> waiting_for_map;
   OSDMapRef osdmap_ref;
+  OSDMapRef last_persisted_osdmap_ref;
   PGPool pool;
 
   void queue_op(OpRequestRef& op);
@@ -1067,19 +1072,8 @@ public:
 
   // -- scrub --
   struct Scrubber {
-    Scrubber() :
-      reserved(false), reserve_failed(false),
-      epoch_start(0),
-      active(false), queue_snap_trim(false),
-      waiting_on(0), shallow_errors(0), deep_errors(0), fixed(0),
-      must_scrub(false), must_deep_scrub(false), must_repair(false),
-      auto_repair(false),
-      num_digest_updates_pending(0),
-      state(INACTIVE),
-      deep(false),
-      seed(0)
-    {
-    }
+    Scrubber();
+    ~Scrubber();
 
     // metadata
     set<pg_shard_t> reserved_peers;
@@ -1132,6 +1126,7 @@ public:
       FINISH,
     } state;
 
+    std::unique_ptr<Scrub::Store> store;
     // deep scrub
     bool deep;
     uint32_t seed;
@@ -1211,6 +1206,7 @@ public:
       num_digest_updates_pending = 0;
     }
 
+    void create_results(const hobject_t& obj);
   } scrubber;
 
   bool scrub_after_recovery;
@@ -2057,7 +2053,6 @@ public:
 
   bool do_sort_bitwise;
   epoch_t last_epoch;
-  epoch_t last_persisted_epoch;
 
  public:
   const spg_t&      get_pgid() const { return pg_id; }

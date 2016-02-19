@@ -17,6 +17,7 @@
 #include "common/config.h"
 #include "OSD.h"
 #include "OpRequest.h"
+#include "ScrubStore.h"
 
 #include "common/Timer.h"
 
@@ -195,7 +196,7 @@ PG::PG(OSDService *o, OSDMapRef curmap,
     _pool.id,
     p.shard),
   map_lock("PG::map_lock"),
-  osdmap_ref(curmap), pool(_pool),
+  osdmap_ref(curmap), last_persisted_osdmap_ref(curmap), pool(_pool),
   _lock("PG::_lock"),
   ref(0),
   #ifdef PG_DEBUG_REFS
@@ -233,8 +234,7 @@ PG::PG(OSDService *o, OSDMapRef curmap,
   acting_features(CEPH_FEATURES_SUPPORTED_DEFAULT),
   upacting_features(CEPH_FEATURES_SUPPORTED_DEFAULT),
   do_sort_bitwise(false),
-  last_epoch(0),
-  last_persisted_epoch(curmap->get_epoch())
+  last_epoch(0)
 {
 #ifdef PG_DEBUG_REFS
   osd->add_pgid(p, this);
@@ -943,6 +943,21 @@ void PG::clear_primary_state()
 
   agent_clear();
 }
+
+PG::Scrubber::Scrubber()
+ : reserved(false), reserve_failed(false),
+   epoch_start(0),
+   active(false), queue_snap_trim(false),
+   waiting_on(0), shallow_errors(0), deep_errors(0), fixed(0),
+   must_scrub(false), must_deep_scrub(false), must_repair(false),
+   auto_repair(false),
+   num_digest_updates_pending(0),
+   state(INACTIVE),
+   deep(false),
+   seed(0)
+{}
+
+PG::Scrubber::~Scrubber() {}
 
 /**
  * find_best_info
@@ -2806,7 +2821,7 @@ void PG::prepare_write_info(map<string,bufferlist> *km)
   assert(ret == 0);
   if (need_update_epoch)
     last_epoch = get_osdmap()->get_epoch();
-  last_persisted_epoch = last_epoch;
+  last_persisted_osdmap_ref = osdmap_ref;
 
   dirty_info = false;
   dirty_big_info = false;
@@ -4011,6 +4026,16 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
 	  scrubber.reserved_peers.clear();
 	}
 
+	{
+	  ObjectStore::Transaction t;
+	  if (scrubber.store) {
+	    scrubber.store->cleanup(&t);
+	  }
+	  scrubber.store.reset(Scrub::Store::create(osd->store, &t,
+						    info.pgid, coll));
+	  osd->store->queue_transaction(osr.get(), std::move(t), nullptr);
+	}
+
         // Don't include temporary objects when scrubbing
         scrubber.start = info.pgid.pgid.get_hobj_start();
         scrubber.state = PG::Scrubber::NEW_CHUNK;
@@ -4288,6 +4313,7 @@ void PG::scrub_compare_maps()
       missing_digest,
       scrubber.shallow_errors,
       scrubber.deep_errors,
+      scrubber.store.get(),
       info.pgid, acting,
       ss);
     dout(2) << ss.str() << dendl;
@@ -4321,6 +4347,12 @@ void PG::scrub_compare_maps()
 
   // ok, do the pg-type specific scrubbing
   _scrub(authmap, missing_digest);
+  if (!scrubber.store->empty()) {
+    dout(10) << __func__ << ": updating scrub object" << dendl;
+    ObjectStore::Transaction t;
+    scrubber.store->flush(&t);
+    osd->store->queue_transaction(osr.get(), std::move(t), nullptr);
+  }
 }
 
 bool PG::scrub_process_inconsistent()
@@ -5440,15 +5472,15 @@ void PG::handle_activate_map(RecoveryCtx *rctx)
   dout(10) << "handle_activate_map " << dendl;
   ActMap evt;
   recovery_state.handle_event(evt, rctx);
-  if (osdmap_ref->get_epoch() - last_persisted_epoch >
+  if (osdmap_ref->get_epoch() - last_persisted_osdmap_ref->get_epoch() >
     cct->_conf->osd_pg_epoch_persisted_max_stale) {
     dout(20) << __func__ << ": Dirtying info: last_persisted is "
-	     << last_persisted_epoch
+	     << last_persisted_osdmap_ref->get_epoch()
 	     << " while current is " << osdmap_ref->get_epoch() << dendl;
     dirty_info = true;
   } else {
     dout(20) << __func__ << ": Not dirtying info: last_persisted is "
-	     << last_persisted_epoch
+	     << last_persisted_osdmap_ref->get_epoch()
 	     << " while current is " << osdmap_ref->get_epoch() << dendl;
   }
   if (osdmap_ref->check_new_blacklist_entries()) check_blacklisted_watchers();
